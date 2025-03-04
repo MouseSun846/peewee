@@ -32,7 +32,8 @@ def db_loader(engine, name='peewee_test', db_class=None, **params):
             MySQLConnectorDatabase: ['mysqlconnector'],
             MariaDBConnectorDatabase: ['mariadb', 'maridbconnector'],
             CockroachDatabase: ['cockroach', 'cockroachdb', 'crdb'],
-        }
+            DmSQLDatabase: ['dmsql'],
+        }        
         engine_map = dict((alias, db) for db, aliases in engine_aliases.items()
                           for alias in aliases)
         if engine.lower() not in engine_map:
@@ -46,6 +47,8 @@ def db_loader(engine, name='peewee_test', db_class=None, **params):
         params.update(CRDB_PARAMS)
     elif issubclass(db_class, PostgresqlDatabase):
         params.update(PSQL_PARAMS)
+    elif issubclass(db_class, DmSQLDatabase):
+        params.update(DMSQL_PARAMS)
     return db_class(name, **params)
 
 
@@ -62,6 +65,7 @@ IS_MYSQL = BACKEND.startswith(('mysql', 'maria'))
 IS_POSTGRESQL = BACKEND.startswith(('postgres', 'psycopg'))
 IS_CRDB = BACKEND in ('cockroach', 'cockroachdb', 'crdb')
 IS_PSYCOPG3 = BACKEND == 'psycopg3'
+IS_DMSQL = BACKEND == 'dmsql' 
 
 
 def make_db_params(key):
@@ -77,6 +81,7 @@ def make_db_params(key):
 CRDB_PARAMS = make_db_params('CRDB')
 MYSQL_PARAMS = make_db_params('MYSQL')
 PSQL_PARAMS = make_db_params('PSQL')
+DMSQL_PARAMS = make_db_params('DMSQL')
 
 if VERBOSITY > 1:
     handler = logging.StreamHandler()

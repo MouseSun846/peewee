@@ -55,6 +55,7 @@ except ImportError:
 from peewee import MySQLDatabase
 from peewee import PostgresqlDatabase
 from peewee import SqliteDatabase
+from peewee import DmSQLDatabase
 
 logger = logging.getLogger('peewee.pool')
 
@@ -279,6 +280,18 @@ class PooledMySQLDatabase(PooledDatabase, MySQLDatabase):
         else:
             return False
 
+class PooledDmSQLDatabase(PooledDatabase, DmSQLDatabase):
+    def _is_closed(self, conn):
+        if self.server_version[0] == 8:
+            args = ()
+        else:
+            args = (False,)
+        try:
+            conn.ping(*args)
+        except:
+            return True
+        else:
+            return False
 
 class _PooledPostgresqlDatabase(PooledDatabase):
     def _is_closed(self, conn):

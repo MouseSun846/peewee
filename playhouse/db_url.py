@@ -11,6 +11,8 @@ from playhouse.pool import PooledPostgresqlDatabase
 from playhouse.pool import PooledPsycopg3Database
 from playhouse.pool import PooledSqliteDatabase
 from playhouse.pool import PooledSqliteExtDatabase
+from playhouse.pool import PooledDmSQLDatabase
+from playhouse.pool import DmSQLDatabase
 from playhouse.psycopg3_ext import Psycopg3Database
 from playhouse.sqlite_ext import SqliteExtDatabase
 
@@ -32,6 +34,8 @@ schemes = {
     'sqliteext': SqliteExtDatabase,
     'sqlite+pool': PooledSqliteDatabase,
     'sqliteext+pool': PooledSqliteExtDatabase,
+    'dm+pool': PooledDmSQLDatabase,
+    'dm': DmSQLDatabase,
 }
 
 def register_database(db_class, *names):

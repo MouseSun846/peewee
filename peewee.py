@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 import warnings
+import dmPython
 try:
     from collections.abc import Mapping
 except ImportError:
@@ -127,6 +128,7 @@ __all__ = [
     'Model',
     'ModelIndex',
     'MySQLDatabase',
+    'DmSQLDatabase',
     'NotSupportedError',
     'OP',
     'OperationalError',
@@ -4410,6 +4412,261 @@ class MySQLDatabase(Database):
         return ctx.literal('DO 0')
 
 
+class DmSQLDatabase(Database):
+    field_types = {
+        'AUTO': 'INTEGER AUTO_INCREMENT',
+        'BIGAUTO': 'BIGINT AUTO_INCREMENT',
+        'BOOL': 'BOOL',
+        'DECIMAL': 'NUMERIC',
+        'DOUBLE': 'DOUBLE PRECISION',
+        'FLOAT': 'FLOAT',
+        'UUID': 'VARCHAR(40)',
+        'UUIDB': 'VARBINARY(16)'}
+    operations = {
+        'LIKE': 'LIKE BINARY',
+        'ILIKE': 'LIKE',
+        'REGEXP': 'REGEXP BINARY',
+        'IREGEXP': 'REGEXP',
+        'XOR': 'XOR'}
+    param = '%s'
+    quote = '\"\"'
+
+    compound_select_parentheses = CSQ_PARENTHESES_UNNESTED
+    for_update = True
+    index_using_precedes_table = True
+    limit_max = 2 ** 64 - 1
+    safe_create_index = False
+    safe_drop_index = False
+
+    def init(self, database, **kwargs):
+        params = {}
+        params.update(kwargs)
+        if 'username' in params:
+            params['user'] = params.pop('username')
+        super(DmSQLDatabase, self).init(database, **params)
+
+    def _connect(self):
+        import os
+        if dmPython is None:
+            raise ImproperlyConfigured('DmSql driver not installed!')
+        print(f'host={os.environ.get("host")}')
+        print(f'self.connect_params={self.connect_params}')
+        conn = dmPython.connect(schema=self.database, autoCommit=True,
+                             **self.connect_params)
+        return conn
+    
+    def execute_sql(self, sql, params=None, commit=None):
+        if commit is not None:
+            __deprecated__('"commit" has been deprecated and is a no-op.')
+        logger.debug(sql%tuple(params))
+        with __exception_wrapper__:
+            cursor = self.cursor()
+            cursor.execute(sql % tuple(params))
+        return cursor
+    
+    def _set_server_version(self, conn):
+        try:
+            version_raw = conn.server_version
+        except AttributeError:
+            pass
+        self.server_version = self._extract_server_version(version_raw)
+
+    def _extract_server_version(self, version):
+        version = version.lower()
+        if 'maria' in version:
+            match_obj = re.search(r'(1\d\.\d+\.\d+)', version)
+        else:
+            match_obj = re.search(r'(\d\.\d+\.\d+)', version)
+        if match_obj is not None:
+            return tuple(int(num) for num in match_obj.groups()[0].split('.'))
+
+        warnings.warn('Unable to determine MySQL version: "%s"' % version)
+        return (0, 0, 0)  # Unable to determine version!
+
+    def is_connection_usable(self):
+        if self._state.closed:
+            return False
+
+        conn = self._state.conn
+        if hasattr(conn, 'ping'):
+            if self.server_version[0] == 8:
+                args = ()
+            else:
+                args = (False,)
+            try:
+                conn.ping(*args)
+            except Exception:
+                return False
+        return True
+
+    def default_values_insert(self, ctx):
+        return ctx.literal('() VALUES ()')
+
+    def begin(self, isolation_level=None):
+        if self.is_closed():
+            self.connect()
+        with __exception_wrapper__:
+            curs = self.cursor()
+            if isolation_level:
+                curs.execute('SET TRANSACTION ISOLATION LEVEL %s' %
+                             isolation_level)
+            curs.execute('START TRANSACTION;')
+
+    def get_tables(self, schema=None):
+        cursor = self.cursor()
+        if schema is None:
+            # 获取当前模式名
+            cursor.execute("SELECT SYS_CONTEXT('userenv', 'current_schema') FROM dual")
+            current_schema = cursor.fetchall()
+            schema = current_schema[0][0]
+        query = 'SELECT table_name FROM DBA_TABLES WHERE OWNER = \'{}\' ORDER BY TABLE_NAME'.format(schema)
+        cursor.execute(query)
+        return [table for table, in cursor.fetchall()]
+
+    def get_views(self, schema=None):
+        cursor = self.cursor()        
+        if schema is None:
+            # 获取当前模式名
+            self.execute("SELECT SYS_CONTEXT('userenv', 'current_schema') FROM dual")
+            current_schema = cursor.fetchall()
+            schema = current_schema[0][0]    
+        query = 'SELECT VIEW_NAME, TEXT FROM DBA_VIEWS WHERE  OWNER = \'{}\' ORDER BY VIEW_NAME'.format(schema)
+        cursor.execute(query)
+        return [ViewMetadata(*row) for row in cursor.fetchall()]
+
+    def get_indexes(self, table, schema=None):
+        cursor = self.cursor()
+        if schema is None:
+            # 获取当前模式名
+            self.execute("SELECT SYS_CONTEXT('userenv', 'current_schema') FROM dual")
+            current_schema = cursor.fetchall()
+            schema = current_schema[0][0]  
+        query='SELECT * FROM DBA_INDEXES WHERE OWNER = \'{}\'  AND TABLE_NAME=\'{}\''.format(schema,table)    
+        self.execute(query)
+        # 索引名称
+        unique = set()
+        # 索引名称-列名称字典
+        indexes = {}
+        rows = cursor.fetchall()
+        for row in rows:
+            if row[6] == "UNIQUE":
+                # 索引名称
+                unique.add(row[1])
+            indexes.setdefault(row[1], [])
+            # 查询列名称
+            self.execute("SELECT COLUMN_NAME FROM DBA_IND_COLUMNS WHERE INDEX_NAME = \'{}\' AND TABLE_NAME=\'{}\'".format(row[1], table))
+            columns = cursor.fetchall()
+            if len(columns) > 0:
+                indexes[row[1]].append(columns[0][0])
+        return [IndexMetadata(name, None, indexes[name], name in unique, table)
+                for name in indexes]
+
+    def get_columns(self, table, schema=None):
+        cursor = self.cursor()
+        sql = """
+            SELECT 
+                COLUMN_NAME,  -- 列名
+                CASE WHEN NULLABLE = 'Y' THEN 'YES' ELSE 'NO' END AS is_nullable,  -- 是否可为空
+                DATA_TYPE,  -- 数据类型
+                DATA_DEFAULT  -- 列的默认值
+            FROM 
+                USER_TAB_COLUMNS
+            WHERE 
+                TABLE_NAME=\'{}\'
+            ORDER BY 
+                COLUMN_ID;  -- 按列的顺序位置排序""".format(table)
+        self.execute(sql)
+        res = cursor.fetchall()
+        pks = set(self.get_primary_keys(self, table))
+        return [ColumnMetadata(name, dt, null == 'YES', name in pks, table, df)
+                for name, null, dt, df in res]
+
+    def get_primary_keys(self, table, schema=None):
+        cursor = self.cursor()
+        if schema is None:
+            # 获取当前模式名
+            self.execute("SELECT SYS_CONTEXT('userenv', 'current_schema') FROM dual")
+            current_schema = cursor.fetchall()
+            schema = current_schema[0][0]      
+        # 先找到所有索引
+        indexs = self.get_indexes(self, table)
+
+        sql = """
+    SELECT 
+        c.CONSTRAINT_TYPE
+    FROM 
+        DBA_CONSTRAINTS as c
+    JOIN 
+        DBA_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+    WHERE 
+        c.INDEX_NAME = \'{}\' 
+        AND c.TABLE_NAME = \'{}\' 
+        AND c.OWNER = \'{}\' ;   
+    """
+        for item in indexs:
+            self.execute(sql.format(item.name, table, schema))
+            res = cursor.fetchall()
+            if len(res) > 0 and res[0][0] == 'P':
+                return item.columns
+        return []
+
+    def get_foreign_keys(self, table, schema=None):
+        cursor = self.cursor()
+        if schema is None:
+            # 获取当前模式名
+            self.execute("SELECT SYS_CONTEXT('userenv', 'current_schema') FROM dual")
+            current_schema = cursor.fetchall()
+            schema = current_schema[0][0]       
+        query = """
+    SELECT 
+        cc.COLUMN_NAME,
+        rc.TABLE_NAME,
+        rcc.COLUMN_NAME
+    FROM 
+        DBA_CONSTRAINTS as c
+    JOIN 
+        DBA_CONS_COLUMNS AS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+    JOIN 
+        DBA_CONSTRAINTS AS rc ON c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+    JOIN 
+        DBA_CONS_COLUMNS AS rcc ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME
+    WHERE 
+        cc.TABLE_NAME = \'{}\'
+        AND cc.OWNER = \'{}\'
+        AND c.CONSTRAINT_TYPE = \'R\' """.format(table, schema)
+        self.execute(query)
+        res = cursor.fetchall()
+        return [ForeignKeyMetadata(column, dest_table, dest_column, table)
+            for column, dest_table, dest_column in res]
+
+    def get_binary_type(self):
+        return dmPython.BINARY
+
+    def conflict_statement(self, on_conflict, query):
+        raise NotImplementedError
+
+    def conflict_update(self, on_conflict, query):
+        raise NotImplementedError
+
+    def extract_date(self, date_part, date_field):
+        return fn.EXTRACT(NodeList((SQL(date_part), SQL('FROM'), date_field)))
+
+    def truncate_date(self, date_part, date_field):
+        return fn.DATE_FORMAT(date_field, __mysql_date_trunc__[date_part],
+                              python_value=simple_date_time)
+
+    def to_timestamp(self, date_field):
+        return fn.UNIX_TIMESTAMP(date_field)
+
+    def from_timestamp(self, date_field):
+        return fn.FROM_UNIXTIME(date_field)
+
+    def random(self):
+        return fn.rand()
+
+    def get_noop_select(self, ctx):
+        return ctx.literal('DO 0')
+    
 # TRANSACTION CONTROL.
 
 

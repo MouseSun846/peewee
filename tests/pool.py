@@ -14,13 +14,14 @@ from .base import BACKEND
 from .base import BaseTestCase
 from .base import IS_CRDB
 from .base import IS_MYSQL
+from .base import IS_DMSQL
 from .base import IS_POSTGRESQL
 from .base import IS_SQLITE
 from .base import ModelTestCase
 from .base import db_loader
 from .base_models import Register
 
-
+logger = logging.getLogger('peewee.pool')
 class FakeTransaction(_transaction):
     def _add_history(self, message):
         self.db.transaction_history.append(
@@ -379,6 +380,8 @@ class TestPooledDatabaseIntegration(ModelTestCase):
                 db_class = PooledPostgresqlDatabase
         elif IS_CRDB:
             db_class = PooledCockroachDatabase
+        elif IS_DMSQL:
+            db_class = PooledDmSQLDatabase
         else:
             db_class = PooledSqliteDatabase
             params['check_same_thread'] = False
@@ -442,8 +445,8 @@ class TestPooledDatabaseIntegration(ModelTestCase):
     def test_pool_with_models(self):
         self.database.close()
         signal = threading.Event()
-
         def create_obj(i):
+            logger.debug('create_obj(%s)', i)
             with self.database.connection_context():
                 with self.database.atomic():
                     Register.create(value=i)
@@ -462,11 +465,9 @@ class TestPooledDatabaseIntegration(ModelTestCase):
         self.assertTrue(self.database.connect())
         while Register.select().count() != 4:
             time.sleep(0.005)
-
         # Signal threads that they can exit now and ensure all exited.
         signal.set()
         for t in threads: t.join()
-
         # Close connection from main thread as well.
         self.database.close()
 

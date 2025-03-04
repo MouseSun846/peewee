@@ -34,6 +34,7 @@ DATABASE_ALIASES = {
     MySQLDatabase: ['mysql', 'mysqldb'],
     PostgresqlDatabase: ['postgres', 'postgresql'],
     SqliteDatabase: ['sqlite', 'sqlite3'],
+    DmSQLDatabase: ['dm', 'dmdb'],
 }
 
 DATABASE_MAP = dict((value, key)
